@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,25 +78,28 @@ func handlerUsers(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	feed, err := fetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
-	if err != nil {
-		return err
+	if len(cmd.Args) == 0 {
+		return fmt.Errorf("usage: cli agg <duration between fetches(1s, 1m, 1h)>")
 	}
-	fmt.Println(*feed)
-	return nil
+
+	timeBetweenRequests, err := time.ParseDuration(cmd.Args[0])
+	if err != nil {
+		return fmt.Errorf("error parsing duration(%v) between fetches: %v", cmd.Args[0], err)
+	}
+
+	ticker := time.NewTicker(timeBetweenRequests)
+	for ; ; <-ticker.C {
+		scrapeFeeds(s)
+	}
 }
 
-func handlerAddFeed(s *state, cmd command) error {
+func handlerAddFeed(s *state, cmd command, currentUser database.User) error {
 	if len(cmd.Args) < 2 {
 		return fmt.Errorf("usage: cli addfeed <feedname> <feedurl>")
 	}
 	feedName := cmd.Args[0]
 	feedURL := cmd.Args[1]
 	createionTime := time.Now()
-	currentUser, err := s.db.GetUser(context.Background(), s.config.CurrentUserName)
-	if err != nil {
-		return err
-	}
 
 	dbFeed, err := s.db.CreateFeed(context.Background(), database.CreateFeedParams{
 		ID:        uuid.New(),
@@ -108,8 +112,20 @@ func handlerAddFeed(s *state, cmd command) error {
 	if err != nil {
 		return err
 	}
+	createionTime = time.Now()
 
-	fmt.Println(dbFeed)
+	_, err = s.db.CreateFeedFollow(context.Background(), database.CreateFeedFollowParams{
+		ID:        uuid.New(),
+		UserID:    currentUser.ID,
+		FeedID:    dbFeed.ID,
+		CreatedAt: createionTime,
+		UpdatedAt: createionTime,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("You've followed the %v feed!\n", dbFeed.Name)
 	return nil
 }
 
@@ -139,6 +155,94 @@ func handlerFeeds(s *state, cmd command) error {
 
 	for _, dbFeed := range dbFeeds {
 		fmt.Printf("Feed name: %v, Feed URL: %v, User: %v\n", dbFeed.Name, dbFeed.Url, userMap[dbFeed.UserID].Name)
+	}
+	return nil
+}
+
+func handlerFollow(s *state, cmd command, currentUser database.User) error {
+	if len(cmd.Args) == 0 {
+		return fmt.Errorf("usage: cli follow <url>")
+	}
+
+	dbFeed, err := s.db.GetFeedByUrl(context.Background(), cmd.Args[0])
+	if err != nil {
+		return err
+	}
+	createionTime := time.Now()
+
+	res, err := s.db.CreateFeedFollow(context.Background(), database.CreateFeedFollowParams{
+		ID:        uuid.New(),
+		UserID:    currentUser.ID,
+		FeedID:    dbFeed.ID,
+		CreatedAt: createionTime,
+		UpdatedAt: createionTime,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("User: %v, just followed the %v feed!\n", res.UserName, res.FeedName)
+	return nil
+}
+
+func handlerFollowing(s *state, cmd command, currentUser database.User) error {
+	feedFollows, err := s.db.GetFeedFollowsForUser(context.Background(), currentUser.ID)
+	if err != nil {
+		return err
+	}
+
+	for _, feedFollow := range feedFollows {
+		fmt.Printf("%v\n", feedFollow.FeedName)
+	}
+
+	return nil
+}
+
+func handlerUnfollow(s *state, cmd command, currentUser database.User) error {
+	if len(cmd.Args) == 0 {
+		return fmt.Errorf("usage: cli unfollow <url>")
+	}
+
+	dbFeed, err := s.db.GetFeedByUrl(context.Background(), cmd.Args[0])
+	if err != nil {
+		return err
+	}
+
+	err = s.db.DeleteFeedFollowForUser(context.Background(), database.DeleteFeedFollowForUserParams{
+		UserID: currentUser.ID,
+		FeedID: dbFeed.ID,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("You've successfully unfollowed %v feed!", dbFeed.Name)
+	return nil
+}
+
+func handlerBrowse(s *state, cmd command, currentUser database.User) error {
+	var limit int
+	var err error
+	if len(cmd.Args) == 0 {
+		limit = 2
+	} else {
+		limit, err = strconv.Atoi(cmd.Args[0])
+		if err != nil {
+			return fmt.Errorf("cli browse [limit(int)]")
+		}
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), database.GetPostsForUserParams{
+		UserID: currentUser.ID,
+		Limit:  int32(limit),
+	})
+
+	for _, post := range posts {
+		fmt.Println("Title:", post.Title)
+		fmt.Println("Description:", post.Description)
+		fmt.Println("Published at:", post.PublishedAt)
+		fmt.Println("URL:", post.Url)
+		fmt.Println("------------------------------------------------------------------------------")
 	}
 	return nil
 }
